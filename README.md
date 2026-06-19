@@ -62,8 +62,8 @@ Full methodology (Cython RE with Ghidra/PyGhidra): [`docs/REVERSE_ENGINEERING.md
 same mechanism Creality already uses for `PAUSE`, `RESUME`, …). The wrapper calls a small Klipper
 extra ([`purge_temp_fix.py`](purge_temp_fix.py)) that:
 
-1. Reads the **incoming** material (`box.material_type`) and the **outgoing / in-nozzle** material
-   (`box.remain_material_type`).
+1. Reads the **incoming** material (`filament_rack.material_type`) and the **outgoing /
+   in-nozzle** material (`filament_rack.remain_material_type`).
 2. Looks each up in `material_database.json` with a correct **integer-normalized** id match
    (fixing the 6-vs-5-digit bug), getting each material's `minTemp`/`maxTemp`.
 3. Computes the safe overlap:
@@ -116,7 +116,11 @@ curl -X POST http://$PRN:7125/printer/firmware_restart
 ### Verify
 
 ```sh
-# incompatible pair should error WITHOUT heating (target stays 0):
+# preview the temp for any change WITHOUT heating (target stays 0):
+curl -X POST "http://$PRN:7125/printer/gcode/script?script=CFS_SMART_PURGE_SET_TEMP%20DRYRUN=1%20NEW=000003%20OLD=019001"
+# -> "... Generic PETG[220-270], old HP-ASA[240-280] -> overlap [240-270] -> would purge @ 250 C"
+
+# incompatible pair errors WITHOUT heating:
 curl -X POST "http://$PRN:7125/printer/gcode/script?script=CFS_SMART_PURGE_SET_TEMP%20NEW=001001%20OLD=007002"
 # -> "CFS purge: incompatible materials, no common safe temperature (...)"
 ```

@@ -77,32 +77,52 @@ class PurgeTempFix:
         return None
 
     def _involved_ids(self, gcmd):
-        # Explicit override wins (NEW=/OLD=); otherwise read the live box state.
+        # Explicit override wins (NEW=/OLD=); otherwise read the live CFS state.
+        # The material fields live on the 'filament_rack' object (NOT 'box').
         new_id = gcmd.get('NEW', None)
         old_id = gcmd.get('OLD', None)
         if new_id is None or old_id is None:
-            try:
-                box = self.printer.lookup_object('box')
-                st = box.get_status(self.reactor.monotonic())
-                if new_id is None:
-                    new_id = st.get('material_type')
-                if old_id is None:
-                    old_id = st.get('remain_material_type')
-            except Exception as e:
-                logging.exception("CFS_SMART_PURGE: box state read failed: %s" % e)
+            found = {}
+            for objname in ('filament_rack', 'box'):
+                try:
+                    obj = self.printer.lookup_object(objname, None)
+                    if obj is None:
+                        continue
+                    st = obj.get_status(self.reactor.monotonic())
+                    for k in ('material_type', 'remain_material_type'):
+                        v = st.get(k)
+                        if k not in found and v not in (None, '', -1, '-1', 'None'):
+                            found[k] = v
+                except Exception as e:
+                    logging.exception("CFS_SMART_PURGE: %s state read failed: %s"
+                                      % (objname, e))
+            if new_id is None:
+                new_id = found.get('material_type')
+            if old_id is None:
+                old_id = found.get('remain_material_type')
         return new_id, old_id
 
     def cmd_set_temp(self, gcmd):
+        dry = gcmd.get_int('DRYRUN', 0)
         new_id, old_id = self._involved_ids(gcmd)
         new = self._lookup(new_id)
         old = self._lookup(old_id)
         involved = [(tag, mid, r) for tag, mid, r in
                     (('new', new_id, new), ('old', old_id, old)) if r]
 
+        # Could not resolve ANY material -> never block the load; fall back to the
+        # stock behaviour (the renamed native command) so the operation proceeds.
         if not involved:
-            raise gcmd.error(
-                "CFS purge: cannot resolve any material temperature "
-                "(new=%s, old=%s). Check the material database." % (new_id, old_id))
+            msg = ("CFS_SMART_PURGE: could not resolve materials "
+                   "(new=%s, old=%s); falling back to factory temp." % (new_id, old_id))
+            gcmd.respond_info(msg)
+            if dry:
+                return
+            try:
+                self.gcode.run_script_from_command('_FACTORY_FILAMENT_RACK_SET_TEMP')
+            except Exception as e:
+                logging.exception("CFS_SMART_PURGE: factory fallback failed: %s" % e)
+            return
 
         low = max(r['min'] for _, _, r in involved)
         high = min(r['max'] for _, _, r in involved)
@@ -110,14 +130,18 @@ class PurgeTempFix:
                          for t, _, r in involved)
 
         if low > high:
-            if self.strict_incompatible:
+            if self.strict_incompatible and not dry:
                 raise gcmd.error(
                     "CFS purge: incompatible materials, no common safe temperature "
                     "(%s). Purge/change aborted." % desc)
-            # Non-strict: fall back to the incoming material's own safe range.
-            gcmd.respond_info(
-                "CFS_SMART_PURGE: WARNING incompatible (%s); using incoming "
-                "material only." % desc)
+            if dry:
+                gcmd.respond_info(
+                    "CFS_SMART_PURGE [DRYRUN]: INCOMPATIBLE (%s) -> would %s"
+                    % (desc, "ABORT" if self.strict_incompatible else "use incoming only"))
+            else:
+                gcmd.respond_info(
+                    "CFS_SMART_PURGE: WARNING incompatible (%s); using incoming "
+                    "material only." % desc)
             ref = new or involved[0][2]
             low, high = ref['min'], ref['max']
 
@@ -125,6 +149,12 @@ class PurgeTempFix:
         want = new['nozzle'] if (new and new['nozzle']) else high
         temp = max(low, min(high, want))
         temp = max(self.abs_min, min(self.abs_max, temp))
+
+        if dry:
+            gcmd.respond_info(
+                "CFS_SMART_PURGE [DRYRUN]: %s -> overlap [%d-%d] -> would purge @ %d C"
+                % (desc, low, high, temp))
+            return
 
         gcmd.respond_info(
             "CFS_SMART_PURGE: %s -> overlap [%d-%d] -> purge @ %d C"
